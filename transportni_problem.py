@@ -6,6 +6,21 @@ import numpy as np
 import pandas as pd
 
 # %%
+def izjednaci_kapacitet_i_potraznju(kapacitet, potražnja, cene_df):
+    total_kapacitet = sum(kapacitet)
+    total_potraznja = sum(potražnja)
+
+    if total_kapacitet > total_potraznja:
+        potražnja.append(total_kapacitet - total_potraznja)
+        cene_df['*'] = 0
+
+    elif total_potraznja > total_kapacitet:
+        kapacitet.append(total_potraznja - total_kapacitet)
+        cene_df.loc['*'] = 0
+
+    return kapacitet, potražnja, cene_df
+
+# %%
 def severozapadni_ugao(kapacitet, potražnja):
 
     resenje = np.zeros((len(kapacitet), len(potražnja)))
@@ -130,50 +145,152 @@ def iterativni_postupak(cene: np.ndarray, inicijalno_resenje: pd.DataFrame, ispi
         u = [np.nan] * inicijalno_resenje.shape[0]
         v = [np.nan] * inicijalno_resenje.shape[1]
         nove_degenerativne = []
-        
-        #dodavanje degenerativnih nula tako da ima m+n-1 not np.nan polja u resenju
-        najpopunjeniji_red = (resenje.notna().sum(axis=1)).idxmax()
-        najpopunjenija_kolona = (resenje.notna().sum(axis=0)).idxmax()
-        while resenje.notna().sum().sum() < inicijalno_resenje.shape[0] + inicijalno_resenje.shape[1] - 1:
-            if ispisi_postupak:
-                print ("broj popunjenih", (resenje.notna()).sum().sum(), "m+n-1:", inicijalno_resenje.shape[0] + inicijalno_resenje.shape[1] - 1)
-                print("resenje:")
-                print(resenje)
-            dodata = False
-            for j in resenje.columns:
-                if pd.isna(resenje.iloc[najpopunjeniji_red, j]):
-                    resenje.iloc[najpopunjeniji_red, j] = 0
-                    nove_degenerativne.append((najpopunjeniji_red, j))
-                    dodata = True
+
+        m, n = resenje.shape
+
+        def broj_osnovnih_polja():
+            return int(resenje.notna().to_numpy().sum())
+
+        # Osiguraj tačno m+n-1 osnovnih polja i izbegni izolovane redove/kolone
+        stepen_reda = resenje.notna().sum(axis=1).to_list()
+        stepen_kolone = resenje.notna().sum(axis=0).to_list()
+
+        # Priključi izolovane redove na neku neizolovanu kolonu
+        for i in range(m):
+            if broj_osnovnih_polja() >= m + n - 1:
+                break
+            if stepen_reda[i] == 0:
+                for j in range(n):
+                    if stepen_kolone[j] > 0 and pd.isna(resenje.iat[i, j]):
+                        resenje.iat[i, j] = 0.0
+                        stepen_reda[i] += 1
+                        stepen_kolone[j] += 1
+                        nove_degenerativne.append((i, j))
+                        break
+
+        # Priključi izolovane kolone na neki neizolovani red
+        for j in range(n):
+            if broj_osnovnih_polja() >= m + n - 1:
+                break
+            if stepen_kolone[j] == 0:
+                for i in range(m):
+                    if stepen_reda[i] > 0 and pd.isna(resenje.iat[i, j]):
+                        resenje.iat[i, j] = 0.0
+                        stepen_reda[i] += 1
+                        stepen_kolone[j] += 1
+                        nove_degenerativne.append((i, j))
+                        break
+
+        # Dodaj degenerativne nule dok ne dođemo do m+n-1; preferiraj red/kolonu sa malim stepenom
+        while broj_osnovnih_polja() < m + n - 1:
+            postavljeno = False
+            for i in range(m):
+                if postavljeno:
                     break
-
-            if not dodata:
-                for i in resenje.index:
-                    if pd.isna(resenje.iloc[i, najpopunjenija_kolona]):
-                        resenje.iloc[i, najpopunjenija_kolona] = 0
-                        nove_degenerativne.append((i, najpopunjenija_kolona))
-                        dodata = True
+                for j in range(n):
+                    if pd.isna(resenje.iat[i, j]) and (stepen_reda[i] <= 1 or stepen_kolone[j] <= 1):
+                        resenje.iat[i, j] = 0.0
+                        stepen_reda[i] += 1
+                        stepen_kolone[j] += 1
+                        nove_degenerativne.append((i, j))
+                        postavljeno = True
                         break
-
-            if not dodata:
-                for i in resenje.index:
-                    for j in resenje.columns:
-                        if pd.isna(resenje.iloc[i, j]):
-                            resenje.iloc[i, j] = 0
+            if not postavljeno:
+                # Rezervni slučaj: bilo gde prazno
+                zavrseno = False
+                for i in range(m):
+                    for j in range(n):
+                        if pd.isna(resenje.iat[i, j]):
+                            resenje.iat[i, j] = 0.0
+                            stepen_reda[i] += 1
+                            stepen_kolone[j] += 1
                             nove_degenerativne.append((i, j))
-                            dodata = True
+                            zavrseno = True
                             break
-                    if dodata:
+                    if zavrseno:
                         break
-            if not dodata:
-                raise ValueError("Nije moguće dodati degenerativnu nulu, proverite inicijalno rešenje.")
-            
+
+        # Izaberi početni red za potencijale
         najpopunjeniji_red = (resenje.notna().sum(axis=1)).idxmax()
         najpopunjeniji_red = resenje.index.get_loc(najpopunjeniji_red)
-        u[najpopunjeniji_red] = 0
+        u[najpopunjeniji_red] = 0.0
 
         if ispisi_postupak:
             print("resenje sa degenerativnim nulama:")
+            print(resenje)
+
+        # Izračunaj potencijale u i v BFS-om preko svih komponenti
+        from collections import deque
+        poseceni_redovi = [False] * m
+        posecene_kolone = [False] * n
+
+        def bfs_pocni_od_reda(r):
+            red_cekanja = deque([('red', r)])
+            while red_cekanja:
+                tip, indeks = red_cekanja.popleft()
+                if tip == 'red':
+                    if poseceni_redovi[indeks]:
+                        continue
+                    poseceni_redovi[indeks] = True
+                    for j in range(n):
+                        if pd.notna(resenje.iat[indeks, j]):
+                            if pd.isna(v[j]) and pd.notna(u[indeks]):
+                                v[j] = cene[indeks, j] - u[indeks]
+                            if not posecene_kolone[j]:
+                                red_cekanja.append(('kolona', j))
+                else:  # 'kolona'
+                    if posecene_kolone[indeks]:
+                        continue
+                    posecene_kolone[indeks] = True
+                    for i in range(m):
+                        if pd.notna(resenje.iat[i, indeks]):
+                            if pd.isna(u[i]) and pd.notna(v[indeks]):
+                                u[i] = cene[i, indeks] - v[indeks]
+                            if not poseceni_redovi[i]:
+                                red_cekanja.append(('red', i))
+
+        # Počni BFS od izabranog reda
+        bfs_pocni_od_reda(najpopunjeniji_red)
+
+        # Ako postoje nepovezane komponente, inicijalizuj ih sa 0 i propagiraj
+        while (any(pd.isna(x) for x in u) or any(pd.isna(x) for x in v)):
+            napredovalo = False
+            for i in range(m):
+                if stepen_reda[i] > 0 and pd.isna(u[i]):
+                    u[i] = 0.0
+                    bfs_pocni_od_reda(i)
+                    napredovalo = True
+                    break
+            if not napredovalo:
+                for j in range(n):
+                    if stepen_kolone[j] > 0 and pd.isna(v[j]):
+                        v[j] = 0.0
+                        # Poveži preko bilo kog reda koji ima osnovno polje u toj koloni
+                        for i in range(m):
+                            if pd.notna(resenje.iat[i, j]):
+                                bfs_pocni_od_reda(i)
+                                break
+                        napredovalo = True
+                        break
+            if not napredovalo:
+                break
+
+        if any(pd.isna(val) for val in u) or any(pd.isna(val) for val in v):
+            print("v = ", v)
+            print("u = ", u)
+            print("najpopunjeniji red:", najpopunjeniji_red)
+            print("popunjenost resenja:", resenje.notna().sum().sum())
+            print("cene:")
+            print(cene)
+            raise ValueError("Nedostaju vrednosti u[i] ili v[j]")
+
+        degenerativne_nule.extend(nove_degenerativne)
+        if ispisi_postupak:
+            print("KORAK 1:")
+            print("najpopunjeniji_red:", najpopunjeniji_red)
+            print("u=", u)
+            print("v=", v)
+            print("resenje:")
             print(resenje)
                             
         for _ in range(len(resenje.index) + len(resenje.columns)):
@@ -329,7 +446,19 @@ def iterativni_postupak(cene: np.ndarray, inicijalno_resenje: pd.DataFrame, ispi
 
 # %%    
 if __name__ == "__main__":
-    kapacitet = [20,30, 20, 10]
+    kapacitet = [20, 30, 25]
+    potražnja = [10, 15, 25, 25]
+
+    cene = np.array([
+        [8, 6, 10, 9],
+        [9, 7,  4, 2],
+        [3, 4,  2, 5]
+    ])
+
+    cost_df = pd.DataFrame(cene, columns=['D1', 'D2', 'D3', 'D4'], index=['F1', 'F2', 'F3'])
+
+    
+    """kapacitet = [20,30, 20, 10]
     potražnja = [10, 40, 30]
 
     cene = np.array([
@@ -339,7 +468,10 @@ if __name__ == "__main__":
         [7, 8, 5]
     ])
 
-    cost_df = pd.DataFrame(cene, columns=['D1', 'D2', 'D3'], index=['F1', 'F2', 'F3', 'F4'])
+    cost_df = pd.DataFrame(cene, columns=['D1', 'D2', 'D3'], index=['F1', 'F2', 'F3', 'F4'])"""
+    
+
+    kapacitet, potražnja, cene_df = izjednaci_kapacitet_i_potraznju(kapacitet, potražnja, cost_df)
 
     print("Kapaciteti (Supply):", kapacitet)
     print("Zahtevi (Demand):", potražnja)
